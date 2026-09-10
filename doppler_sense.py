@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 import threading
 import time
@@ -84,6 +85,40 @@ def spark(v: float, vmax: float) -> str:
     if lvl == 0:
         return GREY + "·" + OFF
     return (GREEN if v >= 0 else CYAN) + BLOCKS[lvl] + OFF
+
+
+def term_width(default: int = 80) -> int:
+    return shutil.get_terminal_size((default, 24)).columns
+
+
+def build_panel(width, smooth, base, vshow, vmax, hist, state, carrier_d, f0):
+    """Lay the four rows out to fit the terminal.
+
+    This has to be recomputed every frame, not once at startup: if a single row
+    is wider than the window the terminal wraps it onto a second physical line,
+    the cursor-up at the next repaint lands in the wrong place, and the panel
+    walks down the screen leaving a copy of itself behind on every frame.
+    """
+    w = max(width - 1, 24)      # last column left free: some terminals wrap on it
+
+    bw = min(max(w - 46, 8), 22)
+    row_sig = ("  signal   [%s] %6.1f dB  base %6.1f  thr %6.1f"
+               % (bar(smooth, base.base, base.thr + 15, bw), smooth,
+                  base.base, base.thr))
+
+    half = min(max((w - 26) // 2, 4), 16)
+    row_vel = ("  velocity <%s>  %s%+5.2f m/s%s"
+               % (vmeter(vshow, vmax, half), BOLD, vshow, OFF))
+
+    n = min(max(w - 12, 8), len(hist))
+    row_his = ("  history  %s"
+               % "".join(spark(v, vmax) for v in list(hist)[-n:]))
+
+    row_sta = "  state    %s" % state
+    if w >= 62:
+        row_sta += "  carrier %+5.1f dB  %.0f Hz" % (carrier_d, f0)
+
+    return [row_sig, row_vel, row_his, row_sta]
 
 
 def bar(value: float, lo: float, hi: float, width: int = 22) -> str:
@@ -328,6 +363,7 @@ def run(args):
     binhz = args.samplerate / args.nfft
     rate_hz = args.samplerate / args.hop
     csv = open(args.csv, "w") if args.csv else None
+    tty = sys.stdout.isatty()
 
     try:
         warmup(sensor, 1.0, "Opening the stream")
@@ -376,14 +412,20 @@ def run(args):
         if csv:
             csv.write("t,score_db,threshold_db,carrier_db,speed_ms,detected\n")
 
-        print("   receding ◄──────── velocity ────────► approaching")
+        print("   receding <-------- velocity --------> approaching")
         t0 = time.time()
+        last_log = 0.0
         last_hit = -1e9
         streak = 0
         smooth = base.base
         vel = 0.0
         hist = deque([0.0] * 56, maxlen=56)
-        sys.stdout.write("\n" * 4)        # room for the four-line panel
+        if tty:
+            # Autowrap off while the panel is live: if the window is ever too
+            # narrow the terminal clips the row instead of wrapping it, which
+            # would throw the cursor arithmetic off by a line.
+            sys.stdout.write("\033[?7l\033[?25l")
+            sys.stdout.write("\n" * 4)    # room for the four-line panel
         i = 0
         while args.seconds <= 0 or time.time() - t0 < args.seconds:
             if not sensor.next_frame():
@@ -412,25 +454,26 @@ def run(args):
             hist.append(vshow)
 
             if active:
-                state = (GREEN + "● OBJECT  " + OFF +
+                state = (GREEN + "* OBJECT  " + OFF +
                          ("approaching" if vshow >= 0 else "receding   "))
             else:
-                state = GREY + "○ no motion          " + OFF
+                state = GREY + "  no motion          " + OFF
 
-            lines = [
-                "  signal    [%s] %6.1f dB      baseline %6.1f   threshold %6.1f"
-                % (bar(smooth, base.base, base.thr + 15), smooth,
-                   base.base, base.thr),
-                "  velocity ◄%s►  %s%+5.2f m/s%s"
-                % (vmeter(vshow, args.vmax), BOLD, vshow, OFF),
-                "  history   %s" % "".join(spark(v, args.vmax) for v in hist),
-                "  state     %s   carrier %+5.1f dB   %.0f Hz"
-                % (state, r["carrier_db"] - carrier_ref, sensor.f0),
-            ]
-            sys.stdout.write("\033[%dA" % len(lines))
-            for ln in lines:
-                sys.stdout.write("\033[2K" + ln + "\n")
-            sys.stdout.flush()
+            if tty:
+                lines = build_panel(term_width(), smooth, base, vshow,
+                                    args.vmax, hist, state,
+                                    r["carrier_db"] - carrier_ref, sensor.f0)
+                sys.stdout.write("\033[%dA" % len(lines))
+                for ln in lines:
+                    sys.stdout.write("\033[2K" + ln + "\n")
+                sys.stdout.flush()
+            elif now - last_log > 0.5:
+                # Sin terminal (salida a fichero o a una tubería) el panel no
+                # tiene sentido: los códigos de escape lo llenarían de basura.
+                last_log = now
+                print("%6.1fs  %7.2f dB  thr %7.2f  %+5.2f m/s  %s"
+                      % (now - t0, smooth, base.thr, vshow,
+                         "OBJECT" if active else "-"), flush=True)
 
             if csv:
                 csv.write("%.3f,%.2f,%.2f,%.2f,%.3f,%d\n" % (
@@ -440,6 +483,9 @@ def run(args):
     except KeyboardInterrupt:
         pass
     finally:
+        if tty:
+            sys.stdout.write("\033[?7h\033[?25h")     # autowrap and cursor back
+            sys.stdout.flush()
         sensor.close()
         if csv:
             csv.close()

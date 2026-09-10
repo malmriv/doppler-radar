@@ -44,10 +44,10 @@ Whether the echo comes back above or below the carrier tells you whether the obj
 ## What you see
 
 ```
-  signal    [██████████░░░░░░░░░░░░]  -28.9 dB   baseline -42.1  threshold -35.5
-  velocity ◄···········█████│················►  -0.29 m/s
-  history   ····▁▁▁······▁▁▂▂▃▃▄▄▅▅▅▄▄▃▃▂▂▂▁·▁▁▂▂▂
-  state     ● OBJECT  receding      carrier -0.1 dB   20000 Hz
+  signal   [█████████████·········]  -28.9 dB  base  -42.1  thr  -35.5
+  velocity <···········█████│················>  -0.29 m/s
+  history  ·······························▁▁▂▂▃▃▄▃▃▃▂▂▂▁▁▁▁▁·······
+  state    * OBJECT  receding     carrier  -0.1 dB  20000 Hz
 ```
 
 Green and to the right, approaching; cyan and to the left, receding. The history row covers the last second or so.
