@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 import threading
@@ -66,6 +67,21 @@ def db(x: float) -> float:
 
 BLOCKS = " ▁▂▃▄▅▆▇█"
 GREEN, CYAN, GREY, BOLD, OFF = "\033[92m", "\033[96m", "\033[90m", "\033[1m", "\033[0m"
+YELLOW, DIM = "\033[93m", "\033[2m"
+# Braille spinner, tick and shade all have unambiguous width, so no terminal
+# renders them double and pushes these lines into a wrap that would break the
+# carriage returns the animation relies on.
+SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def disable_colour():
+    """Strip the escapes when nobody is there to render them.
+
+    Redirect the output to a file or a pipe and the colour codes are not
+    colour any more, just noise in the middle of the text.
+    """
+    global GREEN, CYAN, GREY, BOLD, OFF, YELLOW, DIM
+    GREEN = CYAN = GREY = BOLD = OFF = YELLOW = DIM = ""
 
 
 def vmeter(v: float, vmax: float, half: int = 16) -> str:
@@ -79,19 +95,49 @@ def vmeter(v: float, vmax: float, half: int = 16) -> str:
     return left + BOLD + "│" + OFF + right
 
 
-def spark(v: float, vmax: float) -> str:
-    """One character, height proportional to |v|, coloured by direction."""
-    lvl = int(round(min(abs(v) / vmax, 1.0) * 8))
-    if lvl == 0:
-        return GREY + "·" + OFF
-    return (GREEN if v >= 0 else CYAN) + BLOCKS[lvl] + OFF
+def history_block(hist, vmax, width, rows=3):
+    """History as bars growing away from a zero axis.
+
+    Receding goes up, approaching goes down. Half-cell resolution: a full cell
+    is a solid block, a half cell is the lower half above the axis and the
+    upper half below it, so both directions grow away from the line rather
+    than both filling from the bottom.
+    """
+    n = max(min(width, len(hist)), 8)
+    vals = list(hist)[-n:]
+    vals = [0.0] * (n - len(vals)) + vals
+
+    up = [[" "] * n for _ in range(rows)]      # row 0 sits nearest the axis
+    dn = [[" "] * n for _ in range(rows)]
+    for i, v in enumerate(vals):
+        half = min(abs(v) / vmax, 1.0) * rows * 2.0        # height in half-cells
+        rowset, part, col = (up, "▄", CYAN) if v < 0 else (dn, "▀", GREEN)
+        for r in range(rows):
+            if half >= 2 * (r + 1):
+                rowset[r][i] = col + "█" + OFF
+            elif half >= 2 * r + 1:
+                rowset[r][i] = col + part + OFF
+            else:
+                break
+
+    lines = []
+    for r in range(rows - 1, -1, -1):
+        lines.append(("    " + CYAN + "away" + OFF + "   " if r == rows - 1
+                      else " " * 11) + "".join(up[r]))
+    lines.append("  history  " + "-" * n)
+    for r in range(rows):
+        lines.append(("  " + GREEN + "toward" + OFF + "   " if r == rows - 1
+                      else " " * 11) + "".join(dn[r]))
+    return lines
 
 
-def term_width(default: int = 80) -> int:
-    return shutil.get_terminal_size((default, 24)).columns
+def term_size():
+    ts = shutil.get_terminal_size((80, 24))
+    return ts.columns, ts.lines
 
 
-def build_panel(width, smooth, base, vshow, vmax, hist, state, carrier_d, f0):
+def build_panel(width, height, smooth, base, vshow, vmax, hist, state,
+                carrier_d, f0):
     """Lay the four rows out to fit the terminal.
 
     This has to be recomputed every frame, not once at startup: if a single row
@@ -110,15 +156,16 @@ def build_panel(width, smooth, base, vshow, vmax, hist, state, carrier_d, f0):
     row_vel = ("  velocity <%s>  %s%+5.2f m/s%s"
                % (vmeter(vshow, vmax, half), BOLD, vshow, OFF))
 
-    n = min(max(w - 12, 8), len(hist))
-    row_his = ("  history  %s"
-               % "".join(spark(v, vmax) for v in list(hist)[-n:]))
+    # Four fixed rows plus the graph; keep a couple of lines spare so the
+    # panel never outgrows a short window and starts scrolling.
+    rows = min(max((height - 8) // 2, 1), 4)
+    graph = history_block(hist, vmax, max(w - 11, 8), rows)
 
     row_sta = "  state    %s" % state
     if w >= 62:
         row_sta += "  carrier %+5.1f dB  %.0f Hz" % (carrier_d, f0)
 
-    return [row_sig, row_vel, row_his, row_sta]
+    return [row_sig, row_vel] + graph + [row_sta]
 
 
 def bar(value: float, lo: float, hi: float, width: int = 22) -> str:
@@ -312,28 +359,75 @@ class Baseline:
 
 # -------------------------------------------------------------------- modes
 
-def warmup(sensor, seconds, msg):
-    """Fill the buffer and let the microphone AGC settle."""
-    print(msg, end="", flush=True)
-    t_end = time.time() + seconds
-    while time.time() < t_end:
-        sensor.next_frame()
-        sys.stdout.write(".")
+def progress(frac, width=16):
+    n = int(round(min(max(frac, 0.0), 1.0) * width))
+    return CYAN + "█" * n + OFF + DIM + "░" * (width - n) + OFF
+
+
+class Step:
+    """One startup step: a spinner while it runs, a tick when it is done.
+
+    Redraws are throttled, since the analysis loop calls tick() about fifty
+    times a second and a spinner going that fast just looks like noise.
+    """
+
+    def __init__(self, label, tty):
+        self.label, self.tty = label, tty
+        self.i, self.last = 0, 0.0
+        if tty:
+            sys.stdout.write("  %s%s%s  %s" % (CYAN, SPIN[0], OFF, label))
+            sys.stdout.flush()
+        else:
+            print("%s..." % label, flush=True)
+
+    def tick(self, suffix=""):
+        now = time.time()
+        if not self.tty or now - self.last < 0.08:
+            return
+        self.last = now
+        self.i += 1
+        sys.stdout.write("\r\033[2K  %s%s%s  %s%s"
+                         % (CYAN, SPIN[self.i % len(SPIN)], OFF,
+                            self.label, suffix))
         sys.stdout.flush()
-        time.sleep(0.25)
-    print(" done")
+
+    def done(self, detail="", label=None, clear_above=0):
+        """Finish the step, optionally renaming it and wiping lines above.
+
+        A step announces what it is doing while it runs and what it achieved
+        once it is done, and those are rarely the same sentence. clear_above
+        lets an instruction that only applied during the step vanish with it,
+        instead of sitting there afterwards telling the user to hold still.
+        """
+        line = "  %s✔%s  %s%s" % (GREEN, OFF,
+                                    self.label if label is None else label,
+                                    detail)
+        if self.tty:
+            out = "\r\033[2K" + "\033[1A\033[2K" * clear_above
+            sys.stdout.write(out + line + "\n")
+            sys.stdout.flush()
+        else:
+            print(line, flush=True)
 
 
-def auto_freq(sensor, candidates) -> float:
+def note(text, colour=None):
+    # Resolved here, not in the signature: a default argument is bound when
+    # the function is defined, which is before disable_colour() can empty it.
+    if colour is None:
+        colour = GREY
+    for ln in text.split("\n"):
+        print("     %s%s%s" % (colour, ln, OFF))
+
+
+def auto_freq(sensor, candidates, step=None, verbose=False) -> float:
     """Sweep carriers and keep the one that comes back strongest.
 
     Laptop speakers and microphones fall off a cliff above ~20 kHz and the
     exact response varies by model, so it is worth measuring rather than
     guessing.
     """
-    print("Scanning for the best carrier (~%.0f s, stay still):"
-          % (0.8 * len(candidates)))
     best, best_level = candidates[0], -np.inf
+    table = []
     for f in candidates:
         sensor.f0 = f
         sensor.flush()
@@ -342,15 +436,20 @@ def auto_freq(sensor, candidates) -> float:
         while time.time() < t_end:
             if not sensor.next_frame():
                 break
+            if step is not None:
+                step.tick()
             if time.time() > t_end - 0.4:          # skip the transient
                 levels.append(sensor.analyze()["carrier_db"])
         level = float(np.median(levels)) if levels else -999.0
-        mark = ""
         if level > best_level:
-            best, best_level, mark = f, level, "   <-- best"
-        print("   %6.0f Hz : carrier %6.1f dBFS%s" % (f, level, mark))
+            best, best_level = f, level
+        table.append((f, level))
     sensor.f0 = best
-    print("Carrier chosen: %.0f Hz\n" % best)
+    if verbose:
+        print()
+        for f, level in table:
+            print("     %6.0f Hz : carrier %6.1f dBFS%s"
+                  % (f, level, "   <-- best" if f == best else ""))
     return best
 
 
@@ -366,66 +465,94 @@ def run(args):
     tty = sys.stdout.isatty()
 
     try:
-        warmup(sensor, 1.0, "Opening the stream")
+        if tty:
+            print("\n  %sdoppler radar%s   %sacoustic motion sensing%s\n"
+                  % (BOLD, OFF, DIM, OFF))
+
+        st = Step("Warming up the audio stream", tty)
+        t_end = time.time() + 1.0
+        while time.time() < t_end:
+            sensor.next_frame()
+            st.tick()
+        st.done(label="Audio stream ready")
 
         if args.auto_freq:
             cands = [f for f in range(17000, 21001, 500)
                      if f < args.samplerate / 2 - 1200]
-            auto_freq(sensor, cands)
+            st = Step("Finding the best frequency", tty)
+            best = auto_freq(sensor, cands, st, args.verbose)
+            st.done(":  %s%.0f Hz%s" % (BOLD, best, OFF),
+                label="Best frequency")
+        else:
+            print("  %s\u2714%s  Frequency:  %s%.0f Hz%s"
+                  % (GREEN, OFF, BOLD, sensor.f0, OFF))
+            note("--auto-freq picks whichever one your hardware handles best")
 
-        print("Carrier %.0f Hz  |  %.1f Hz/bin  |  %.0f ms window  |  "
-              "Doppler band %.0f-%.0f Hz (%.2f-%.2f m/s)"
-              % (sensor.f0, binhz, 1000 * args.nfft / args.samplerate,
-                 args.band_lo, args.band_hi,
-                 args.band_lo * C_SOUND / (2 * sensor.f0),
-                 args.band_hi * C_SOUND / (2 * sensor.f0)))
-
-        # The built-in microphone runs automatic gain control and takes a few
-        # seconds to settle; measuring before that yields a lying baseline.
-        warmup(sensor, args.warmup,
-               "Settling the microphone AGC (%.0f s)" % args.warmup)
-
+        total = args.warmup + args.calib
+        print()
+        note("Hold still and keep clear of the screen.", BOLD)
+        st = Step("Listening to the room", tty)
         base = Baseline(args.window, rate_hz, args.margin, args.max_threshold)
-        print("Calibrating for %.1f s: keep clear of the screen" % args.calib,
-              end="", flush=True)
         carriers = []
-        t_end = time.time() + args.calib
-        while time.time() < t_end:
+        t_room = time.time()
+        while True:
+            el = time.time() - t_room
+            if el >= total:
+                break
             if not sensor.next_frame():
-                print("\nNo audio arriving from the microphone. "
-                      "Is permission granted?")
+                print()
+                note("No audio from the microphone. Is permission granted?",
+                     YELLOW)
                 return 1
             r = sensor.analyze()
-            base.add(r["score"])
-            sensor.learn_floor(r, 0.15)
-            carriers.append(r["carrier_db"])
+            # The opening stretch is thrown away on purpose: the built-in
+            # microphone runs automatic gain control and takes seconds to
+            # settle, and measuring before that yields a lying baseline.
+            if el >= args.warmup:
+                base.add(r["score"])
+                sensor.learn_floor(r, 0.15)
+                carriers.append(r["carrier_db"])
+            st.tick("  %s  %2ds" % (progress(el / total), int(total - el) + 1))
         base.recompute()
         carrier_ref = float(np.median(carriers))
-        print("\n   baseline %.1f dB   threshold %.1f dB   carrier %.1f dBFS"
-              % (base.base, base.thr, carrier_ref))
+        st.done(label="Room calibrated", clear_above=1)
+
         if carrier_ref < -75:
-            print("   WARNING: the carrier is barely coming back. Turn the volume\n"
-                  "   up, use the BUILT-IN speakers and microphone (no Bluetooth),\n"
-                  "   and try --auto-freq or a lower carrier (--freq 17000).")
-        print("\nMove something in front of the screen.  Ctrl-C to quit.\n")
+            print("\n  %s\u2717%s  %sThe tone is barely coming back.%s"
+                  % (YELLOW, OFF, BOLD, OFF))
+            note("Turn the volume up and use the built-in speakers and\n"
+                 "microphone. Then try --auto-freq, or --freq 17000.", YELLOW)
+        if args.verbose:
+            note("baseline %.1f dB   threshold %.1f dB   carrier %.1f dBFS"
+                 % (base.base, base.thr, carrier_ref))
+            note("%.1f Hz/bin   %.0f ms window   Doppler band %.0f-%.0f Hz "
+                 "(%.2f-%.2f m/s)"
+                 % (binhz, 1000 * args.nfft / args.samplerate,
+                    args.band_lo, args.band_hi,
+                    args.band_lo * C_SOUND / (2 * sensor.f0),
+                    args.band_hi * C_SOUND / (2 * sensor.f0)))
+
+        print("\n  %s\u25b8%s  Move something in front of the screen."
+              "   %sCtrl-C to quit.%s\n" % (CYAN, OFF, DIM, OFF))
 
         if csv:
             csv.write("t,score_db,threshold_db,carrier_db,speed_ms,detected\n")
 
-        print("   receding <-------- velocity --------> approaching")
+        print("  %s   receding <-------- velocity --------> approaching%s"
+              % (DIM, OFF))
         t0 = time.time()
         last_log = 0.0
         last_hit = -1e9
         streak = 0
         smooth = base.base
         vel = 0.0
-        hist = deque([0.0] * 56, maxlen=56)
+        hist = deque([0.0] * 240, maxlen=240)
+        drawn = 0
         if tty:
             # Autowrap off while the panel is live: if the window is ever too
             # narrow the terminal clips the row instead of wrapping it, which
             # would throw the cursor arithmetic off by a line.
             sys.stdout.write("\033[?7l\033[?25l")
-            sys.stdout.write("\n" * 4)    # room for the four-line panel
         i = 0
         while args.seconds <= 0 or time.time() - t0 < args.seconds:
             if not sensor.next_frame():
@@ -460,12 +587,24 @@ def run(args):
                 state = GREY + "  no motion          " + OFF
 
             if tty:
-                lines = build_panel(term_width(), smooth, base, vshow,
+                cols, rows_t = term_size()
+                lines = build_panel(cols, rows_t, smooth, base, vshow,
                                     args.vmax, hist, state,
                                     r["carrier_db"] - carrier_ref, sensor.f0)
-                sys.stdout.write("\033[%dA" % len(lines))
+                if drawn == 0:
+                    sys.stdout.write("\n" * len(lines))
+                    drawn = len(lines)
+                sys.stdout.write("\033[%dA" % drawn)
                 for ln in lines:
                     sys.stdout.write("\033[2K" + ln + "\n")
+                # A resize can shrink the panel: wipe the rows it no longer
+                # uses and step back onto its new last line, or the cursor
+                # arithmetic drifts from here on.
+                extra = drawn - len(lines)
+                if extra > 0:
+                    sys.stdout.write("\033[2K\n" * extra)
+                    sys.stdout.write("\033[%dA" % extra)
+                drawn = len(lines)
                 sys.stdout.flush()
             elif now - last_log > 0.5:
                 # Sin terminal (salida a fichero o a una tubería) el panel no
@@ -536,7 +675,12 @@ def main():
     p.add_argument("--seconds", type=float, default=0.0,
                    help="stop automatically after N seconds (0 = no limit)")
     p.add_argument("--csv", default=None, help="dump the measurements to a CSV")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="show the numbers behind the calibration")
     args = p.parse_args()
+
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        disable_colour()
 
     if args.list_devices:
         print(sd.query_devices())
