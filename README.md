@@ -44,13 +44,21 @@ Whether the echo comes back above or below the carrier tells you whether the obj
 ## What you see
 
 ```
-  signal   [█████████████·········]  -28.9 dB  base  -42.1  thr  -35.5
-  velocity <···········█████│················>  -0.29 m/s
-  history  ·······························▁▁▂▂▃▃▄▃▃▃▂▂▂▁▁▁▁▁·······
-  state    * OBJECT  receding     carrier  -0.1 dB  20000 Hz
+  signal   [███████████████████···]  -23.8 dB  base  -42.1  thr  -35.5
+  velocity <················│██████████······>  +0.62 m/s
+    away   ⠀⠀⠀⠀⢠⣤⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣤⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+           ⠀⠀⠀⢠⣿⣿⣧⠀⠀⠀⠀⠀⠀⠀⠀⣼⣿⣿⡀⠀⠀⠀⠀⠀⠀⠀⢀⣾⣷⡄⠀⠀⠀⠀⠀⠀⠀⠀⢀⣤⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣤⡀⠀⠀
+           ⠀⠀⠀⣼⣿⣿⣿⡆⠀⠀⠀⠀⠀⠀⢰⣿⣿⣿⣧⠀⠀⠀⠀⠀⠀⠀⣾⣿⣿⣷⡀⠀⠀⠀⠀⠀⠀⢠⣿⣿⣿⡄⠀⠀⠀⠀⠀⠀⠀⣰⣿⣿⣆⠀⠀⠀⠀⠀⠀⠀⢠⣿⣿⣿⡀⠀
+           ⠀⠀⢰⣿⣿⣿⣿⣷⠀⠀⠀⠀⠀⠀⣾⣿⣿⣿⣿⡄⠀⠀⠀⠀⠀⢰⣿⣿⣿⣿⣇⠀⠀⠀⠀⠀⠀⣾⣿⣿⣿⣷⡀⠀⠀⠀⠀⠀⣰⣿⣿⣿⣿⡆⠀⠀⠀⠀⠀⢀⣿⣿⣿⣿⣷⠀
+  history  ------------------------------------------------------------------
+           ⣿⣿⠁⠀⠀⠀⠀⠀⢹⣿⣿⣿⣿⡏⠀⠀⠀⠀⠀⠘⣿⣿⣿⣿⡿⠀⠀⠀⠀⠀⠀⢻⣿⣿⣿⣿⠇⠀⠀⠀⠀⠀⠘⣿⣿⣿⣿⡟⠀⠀⠀⠀⠀⠀⢻⣿⣿⣿⣿⠃⠀⠀⠀⠀⠀⠸
+           ⣿⡏⠀⠀⠀⠀⠀⠀⠈⣿⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⢹⣿⣿⣿⠇⠀⠀⠀⠀⠀⠀⠈⢿⣿⣿⡏⠀⠀⠀⠀⠀⠀⠀⠸⣿⣿⡟⠀⠀⠀⠀⠀⠀⠀⠈⢿⣿⣿⠃⠀⠀⠀⠀⠀⠀⠀
+           ⡿⠀⠀⠀⠀⠀⠀⠀⠀⠸⣿⣿⠇⠀⠀⠀⠀⠀⠀⠀⠀⢿⣿⡟⠀⠀⠀⠀⠀⠀⠀⠀⠈⠿⠟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠁⠀⠀⠀⠀⠀⠀⠀⠀
+  toward   ⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+  state    * OBJECT  approaching  carrier  -0.3 dB  21000 Hz
 ```
 
-Green and to the right, approaching; cyan and to the left, receding. The history row covers the last second or so.
+Green and to the right, approaching; cyan and to the left, receding. The graph keeps those colours, with receding growing up and approaching growing down: moving something away from a laptop mostly means lifting it. It is drawn in braille, two samples per column, and covers the last few seconds. `--blocks` swaps it for chunkier bars if your font renders braille badly.
 
 ## Licence
 
