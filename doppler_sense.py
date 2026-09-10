@@ -95,22 +95,62 @@ def vmeter(v: float, vmax: float, half: int = 16) -> str:
     return left + BOLD + "│" + OFF + right
 
 
-def history_block(hist, vmax, width, rows=3):
-    """History as bars growing away from a zero axis.
+# Braille dot bits: the left column, top to bottom, is dots 1-2-3-7, and the
+# right column 4-5-6-8. Two dot columns per character is what buys the extra
+# horizontal resolution, since every cell then holds two samples.
+BRAILLE = ((0x01, 0x02, 0x04, 0x40), (0x08, 0x10, 0x20, 0x80))
+BRAILLE_BLANK = 0x2800
 
-    Receding goes up, approaching goes down. Half-cell resolution: a full cell
-    is a solid block, a half cell is the lower half above the axis and the
-    upper half below it, so both directions grow away from the line rather
-    than both filling from the bottom.
+
+def history_braille(hist, vmax, width, rows):
+    """History as braille bars growing away from a zero axis.
+
+    Four dot rows per character and two samples per column: sixteen levels a
+    side at four rows, and twice the history of a block renderer in the same
+    width. Sixteen levels over a full scale of 1 m/s is 0.06 m/s a level,
+    which lands about on the noise floor of the smoothed estimate, so this is
+    as fine as the reading deserves to be drawn.
+
+    Braille is also the only graphic block used here with an unambiguous
+    width, so no terminal renders it double and clips the row.
     """
+    n = max(min(width, len(hist) // 2), 8)
+    vals = list(hist)[-n * 2:]
+    vals = [0.0] * (n * 2 - len(vals)) + vals
+
+    up = [[BRAILLE_BLANK] * n for _ in range(rows)]
+    dn = [[BRAILLE_BLANK] * n for _ in range(rows)]
+    for i, v in enumerate(vals):
+        cell, col = divmod(i, 2)
+        dots = min(abs(v) / vmax, 1.0) * rows * 4
+        rowset = up if v < 0 else dn
+        for r in range(rows):
+            f = int(round(min(max(dots - 4 * r, 0.0), 4.0)))
+            if f == 0:
+                break
+            for k in range(f):
+                # Above the axis the bar grows from the bottom dot upward,
+                # below it from the top dot down, so both leave the line.
+                rowset[r][cell] |= BRAILLE[col][3 - k if v < 0 else k]
+
+    def render(cells, colour):
+        return colour + "".join(chr(c) for c in cells) + OFF
+
+    return ([render(up[r], CYAN) for r in range(rows - 1, -1, -1)]
+            + ["-" * n]
+            + [render(dn[r], GREEN) for r in range(rows)])
+
+
+def history_blocks(hist, vmax, width, rows):
+    """The same graph in half-cell blocks: coarser, but bolder to read."""
     n = max(min(width, len(hist)), 8)
     vals = list(hist)[-n:]
     vals = [0.0] * (n - len(vals)) + vals
 
-    up = [[" "] * n for _ in range(rows)]      # row 0 sits nearest the axis
+    up = [[" "] * n for _ in range(rows)]
     dn = [[" "] * n for _ in range(rows)]
     for i, v in enumerate(vals):
-        half = min(abs(v) / vmax, 1.0) * rows * 2.0        # height in half-cells
+        half = min(abs(v) / vmax, 1.0) * rows * 2.0
         rowset, part, col = (up, "▄", CYAN) if v < 0 else (dn, "▀", GREEN)
         for r in range(rows):
             if half >= 2 * (r + 1):
@@ -120,15 +160,27 @@ def history_block(hist, vmax, width, rows=3):
             else:
                 break
 
-    lines = []
-    for r in range(rows - 1, -1, -1):
-        lines.append(("    " + CYAN + "away" + OFF + "   " if r == rows - 1
-                      else " " * 11) + "".join(up[r]))
-    lines.append("  history  " + "-" * n)
-    for r in range(rows):
-        lines.append(("  " + GREEN + "toward" + OFF + "   " if r == rows - 1
-                      else " " * 11) + "".join(dn[r]))
-    return lines
+    return (["".join(up[r]) for r in range(rows - 1, -1, -1)]
+            + ["-" * n]
+            + ["".join(dn[r]) for r in range(rows)])
+
+
+def history_graph(hist, vmax, width, rows, blocks=False):
+    """Wrap a renderer's rows in the left gutter that labels the axis."""
+    body = (history_blocks if blocks else history_braille)(
+        hist, vmax, width, rows)
+    out = []
+    for i, row in enumerate(body):
+        if i == 0:
+            gutter = "    " + CYAN + "away" + OFF + "   "
+        elif i == rows:
+            gutter = "  history  "
+        elif i == len(body) - 1:
+            gutter = "  " + GREEN + "toward" + OFF + "   "
+        else:
+            gutter = " " * 11
+        out.append(gutter + row)
+    return out
 
 
 def term_size():
@@ -137,7 +189,7 @@ def term_size():
 
 
 def build_panel(width, height, smooth, base, vshow, vmax, hist, state,
-                carrier_d, f0):
+                carrier_d, f0, blocks=False):
     """Lay the four rows out to fit the terminal.
 
     This has to be recomputed every frame, not once at startup: if a single row
@@ -159,7 +211,7 @@ def build_panel(width, height, smooth, base, vshow, vmax, hist, state,
     # Four fixed rows plus the graph; keep a couple of lines spare so the
     # panel never outgrows a short window and starts scrolling.
     rows = min(max((height - 8) // 2, 1), 4)
-    graph = history_block(hist, vmax, max(w - 11, 8), rows)
+    graph = history_graph(hist, vmax, max(w - 11, 8), rows, blocks)
 
     row_sta = "  state    %s" % state
     if w >= 62:
@@ -546,7 +598,9 @@ def run(args):
         streak = 0
         smooth = base.base
         vel = 0.0
-        hist = deque([0.0] * 240, maxlen=240)
+        # Two samples per column in braille, so the buffer holds twice what
+        # the widest sensible terminal can draw.
+        hist = deque([0.0] * 480, maxlen=480)
         drawn = 0
         if tty:
             # Autowrap off while the panel is live: if the window is ever too
@@ -590,7 +644,8 @@ def run(args):
                 cols, rows_t = term_size()
                 lines = build_panel(cols, rows_t, smooth, base, vshow,
                                     args.vmax, hist, state,
-                                    r["carrier_db"] - carrier_ref, sensor.f0)
+                                    r["carrier_db"] - carrier_ref, sensor.f0,
+                                    args.blocks)
                 if drawn == 0:
                     sys.stdout.write("\n" * len(lines))
                     drawn = len(lines)
@@ -675,6 +730,8 @@ def main():
     p.add_argument("--seconds", type=float, default=0.0,
                    help="stop automatically after N seconds (0 = no limit)")
     p.add_argument("--csv", default=None, help="dump the measurements to a CSV")
+    p.add_argument("--blocks", action="store_true",
+                   help="draw the history in chunky blocks instead of braille")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="show the numbers behind the calibration")
     args = p.parse_args()
