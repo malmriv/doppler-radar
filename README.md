@@ -1,123 +1,121 @@
-# Detectar la mano delante de la pantalla con efecto Doppler
+# Detecting motion in front of the screen with the Doppler effect
 
-Un amigo me mandó un vídeo de algo parecido funcionando: un portátil normal, sin
-hardware añadido, detectando la mano con el altavoz y el micrófono. Mi reacción
-fue **"no hay forma de que eso funcione"**.
+A friend sent me a video of something like this working: an ordinary laptop, no
+extra hardware, sensing a hand through the speaker and the microphone. My
+reaction was **"there is no way that works"**.
 
-Así que lo vibecodeé una tarde para quitarme la espina, sin creérmelo en ningún
-momento y sin la menor intención de que esto llegara a ninguna parte. Para mi
-sorpresa, funciona.
+So I vibecoded it one afternoon to get it out of my system, not believing it for
+a second and with no intention of this going anywhere. To my surprise, it works.
 
 ![demo](demo.gif)
 
-## Los fundamentos, en corto
+## The physics, briefly
 
-El altavoz emite un tono continuo a ~20 kHz, inaudible para casi cualquier
-adulto. El micrófono lo capta por camino directo —la **portadora**, fortísima y
-perfectamente estable— más los ecos de la habitación. Todo lo que está quieto
-refleja en la misma frecuencia. Lo que se mueve devuelve el eco desplazado:
+The speaker emits a continuous tone at ~20 kHz, inaudible to just about any
+adult. The microphone picks it up over the direct path — the **carrier**,
+enormous and perfectly steady — plus every echo in the room. Anything standing
+still reflects at the same frequency. Anything moving sends the echo back
+shifted:
 
 $$\Delta f = \frac{2vf_0}{c}$$
 
-Una mano a 30 cm/s sobre 20 kHz da unos 35 Hz. En relativo es un 0.17 %, una
-miseria; pero al lado de una raya espectral tan limpia como la portadora, son
-seis bins de la FFT y se ven perfectamente.
+An object moving at 30 cm/s on a 20 kHz carrier gives about 35 Hz. In relative
+terms that is a rounding error, 0.17 %; but next to a spectral line as clean as
+the carrier it is six FFT bins, and you can see it perfectly well.
 
-El programa mide la energía que aparece a los lados de la portadora, la divide
-por la potencia de la portadora y compara el resultado con la línea base de la
-habitación vacía. Esa división es lo que hace que el invento sobreviva al
-control automático de ganancia del micro: si el sistema sube o baja el volumen
-de entrada, portadora y bandas laterales suben y bajan juntas, y el cociente ni
-se entera.
+The program measures the energy that shows up on either side of the carrier,
+divides it by the carrier power, and compares the result against the baseline of
+the empty room. That division is what makes the whole thing immune to the
+microphone's automatic gain control: when the system raises or lowers the input
+gain, carrier and sidebands rise and fall together and the ratio never notices.
 
-Que el eco venga por arriba o por abajo en frecuencia dice si te acercas o te
-alejas. Eso es toda la física que hay aquí.
+Whether the echo comes back above or below the carrier tells you whether the
+object is approaching or receding. That is all the physics there is here.
 
-## Cómo hacerlo funcionar en tu ordenador
+## How to make this work on your computer
 
 ```bash
 git clone https://github.com/malmriv/doppler.git
 cd doppler
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python doppler_hand.py --auto-freq
+.venv/bin/python doppler_sense.py --auto-freq
 ```
 
-Tarda unos 15 segundos en arrancar: busca la mejor portadora, espera a que el
-micrófono se estabilice y calibra la habitación. **Aparta las manos durante la
-calibración.** Después, mueve la mano delante de la pantalla. `Ctrl-C` para
-salir.
+Startup takes about 15 seconds: it finds the best carrier, waits for the
+microphone to settle, and calibrates the room. **Keep clear of the screen while
+it calibrates.** Then move something in front of it. `Ctrl-C` to quit.
 
-Ahora las condiciones, que importan más que el código:
+Now the conditions, which matter more than the code does:
 
-- **Altavoces internos, con volumen.** Al 50 % va sobrado. Si los tienes
-  silenciados no hay nada que detectar.
-- **Nada de Bluetooth ni auriculares.** Los AirPods y similares ni llegan a
-  20 kHz ni transmiten sin comprimir, y con auriculares puestos el tono no sale
-  al aire. Altavoz y micro **internos**, los dos.
-- **El micrófono tiene que estar quieto.** Si mueves el portátil, se mueve la
-  geometría entera y todo lo demás parece moverse contigo. En el regazo no
-  funciona; en una mesa, sí.
-- **Concede el permiso de micrófono** cuando lo pida el sistema.
-- **La habitación no tiene por qué estar en silencio.** El ruido normal (voces,
-  teclado, ventiladores) vive por debajo de 8 kHz; a 20 kHz hay 37 dB menos de
-  ruido. Es el rincón más tranquilo del espectro, y por eso el tono es
-  ultrasónico y no audible.
-- **Cuidado con quién más se mueve por la habitación.** Un tono continuo no mide
-  distancia: no distingue tu mano de alguien que pase por detrás.
+- **Built-in speakers, with the volume up.** Halfway is plenty. Muted means
+  there is nothing to detect.
+- **No Bluetooth, no headphones.** AirPods and the like neither reach 20 kHz nor
+  transmit uncompressed, and with headphones on the tone never reaches the air.
+  Speaker and microphone both **built-in**.
+- **The microphone has to stay put.** Move the laptop and the entire geometry
+  moves with it, so everything else appears to move too. On a desk it works; on
+  your lap it does not.
+- **Grant microphone permission** when the system asks.
+- **The room does not need to be quiet.** Ordinary noise — voices, keyboards,
+  fans — lives below 8 kHz; at 20 kHz there is 37 dB less of it. It is the
+  quietest corner of the spectrum, which is exactly why the tone is ultrasonic
+  rather than audible.
+- **Mind who else is moving around.** A continuous tone carries no range
+  information: it cannot tell your hand from someone walking past behind you.
 
-Probado en un MacBook Pro. En Linux y Windows debería ir igual (`sounddevice`
-usa PortAudio en los tres sitios), pero no lo he comprobado.
+Tested on a MacBook Pro. Linux and Windows should behave the same
+(`sounddevice` wraps PortAudio on all three), but I have not verified it.
 
-### Si no va
+### If it does not work
 
-| Síntoma | Causa habitual |
+| Symptom | Usual cause |
 |---|---|
-| Avisa de que "apenas se recibe la portadora" | Volumen bajo, salida por Bluetooth, o auriculares puestos |
-| No detecta nada aunque muevas la mano | Calibraste con movimiento delante; reinícialo y aparta las manos |
-| Detecta constantemente | Algo se mueve cerca: un ventilador, una cortina, alguien pasando |
-| Nada de nada, ni portadora ni ruido | Falta el permiso de micrófono |
+| Warns that the carrier is barely coming back | Volume too low, output routed over Bluetooth, or headphones plugged in |
+| Detects nothing however much you move | You calibrated with movement in front of it; restart and keep clear |
+| Detects constantly | Something nearby is moving: a fan, a curtain, someone walking past |
+| Nothing at all, no carrier and no noise | Microphone permission missing |
 
-Opciones útiles: `--freq 17000` si tu hardware no llega arriba, `--margin` para
-hacerlo más o menos sensible, `--csv fichero.csv` para volcar las medidas y
-mirarlas con calma.
+Useful options: `--freq 17000` if your hardware does not reach that high,
+`--margin` to make it more or less sensitive, `--csv out.csv` to dump the
+measurements and study them at leisure.
 
-## Qué se ve en pantalla
+## What you see
 
 ```
-  señal     [██████████░░░░░░░░░░░░]  -28.9 dB   base -42.1  umbral -35.5
-  veloc.  ◄···········█████│················►  -0.29 m/s
-  historia  ····▁▁▁······▁▁▂▂▃▃▄▄▅▅▅▄▄▃▃▂▂▂▁·▁▁▂▂▂
-  estado    ● MANO  alejándose    portadora -0.1 dB   20000 Hz
+  signal    [██████████░░░░░░░░░░░░]  -28.9 dB   baseline -42.1  threshold -35.5
+  velocity ◄···········█████│················►  -0.29 m/s
+  history   ····▁▁▁······▁▁▂▂▃▃▄▄▅▅▅▄▄▃▃▂▂▂▁·▁▁▂▂▂
+  state     ● OBJECT  receding      carrier -0.1 dB   20000 Hz
 ```
 
-Verde y hacia la derecha, acercándose; cian y hacia la izquierda, alejándose. La
-fila de historia son los últimos segundo y pico.
+Green and to the right, approaching; cyan and to the left, receding. The history
+row covers the last second or so.
 
-## ¿Pero funciona de verdad?
+## But does it actually work?
 
-Eso me preguntaba yo. Medido en un MacBook Pro:
+That was my question too. Measured on a MacBook Pro:
 
-- La portadora se recibe a **-19 dBFS** a 21 kHz. Holgadísima.
-- En calma la línea base es de **-42 dB** con una desviación robusta de 2.4 dB,
-  y el umbral queda 6-8 dB por encima. El detector responde a ecos de hasta
-  **-40 dB** respecto a la portadora.
-- En 25 segundos de habitación "vacía" salieron cuatro episodios limpios de
-  entre medio segundo y segundo y medio, a unos 0.43 m/s. No eran falsos
-  positivos: era yo, moviéndome.
+- The carrier comes back at **-19 dBFS** at 21 kHz. Plenty of headroom.
+- With the room still, the baseline sits at **-42 dB** with a robust deviation
+  of 2.4 dB, and the threshold lands 6-8 dB above it. The detector responds to
+  echoes as faint as **-40 dB** relative to the carrier.
+- In 25 seconds of supposedly empty room it flagged four clean episodes, half a
+  second to a second and a half each, at around 0.43 m/s. Those were not false
+  positives: that was me, moving.
 
-## Lo que no hace
+## What it does not do
 
-El Doppler detecta **movimiento, no presencia**. Una mano perfectamente inmóvil
-delante de la pantalla no genera bandas laterales y el programa no la ve. Sí
-altera un poco la amplitud de la portadora, y eso se muestra como métrica
-secundaria, pero es bastante menos fiable.
+Doppler detects **motion, not presence**. Something perfectly still in front of
+the screen produces no sidebands and the program does not see it. It does
+perturb the carrier amplitude a little, shown as a secondary metric, but that is
+far less reliable.
 
-Tampoco mide distancia, con lo cual no puede separar tu mano de lo que ocurra al
-fondo de la habitación. Para eso haría falta un chirp FMCW en vez de un tono
-fijo, que da distancia y velocidad a la vez. Ahí ya no llegué: esto era una
-tarde para demostrarme que no funcionaba.
+It also measures no distance, so it cannot separate your hand from whatever is
+happening across the room. That would take an FMCW chirp instead of a fixed
+tone, which gives range and velocity at once. I did not get that far: this was
+one afternoon spent proving to myself that it would not work.
 
-## Licencia
+## Licence
 
-MIT. Haz lo que quieras con ello.
+MIT. Do as you please with it.

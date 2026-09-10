@@ -1,37 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-POC de sonar Doppler acústico para macOS.
+Acoustic Doppler sonar, proof of concept.
 
-Idea: el altavoz emite un tono continuo casi inaudible (~19 kHz). El micrófono
-capta ese tono por camino directo (la portadora: fortísima y perfectamente
-estable) más los ecos del entorno. Todo lo que está quieto refleja en la misma
-frecuencia; lo que se mueve devuelve el eco desplazado:
+The speaker emits a continuous, near-inaudible tone (~20 kHz). The microphone
+picks it up over the direct path -- the carrier: enormous and perfectly steady
+-- plus every echo in the room. Anything standing still reflects at the same
+frequency; anything moving sends the echo back shifted:
 
     Δf = 2 · v · f0 / c        (c ≈ 343 m/s)
 
-Una mano a 30 cm/s delante de la pantalla produce Δf ≈ 33 Hz sobre 19 kHz. Es
-un desplazamiento minúsculo en relativo (0.17 %), pero perfectamente visible en
-el espectro porque la portadora es una raya espectral limpísima.
+An object moving at 30 cm/s produces Δf ≈ 35 Hz on a 20 kHz carrier. In
+relative terms that is a rounding error (0.17 %), but next to a spectral line
+as clean as the carrier it is six FFT bins and plainly visible.
 
-El detector, entonces: FFT con una ventana de lóbulos laterales muy bajos
-(Blackman-Harris), medir la energía en las bandas laterales alrededor de la
-portadora, normalizarla por la potencia de la portadora, y compararla con la
-línea base del entorno vacío.
+So the detector is: FFT with a very-low-sidelobe window (Blackman-Harris),
+measure the energy in the sidebands around the carrier, normalise it by the
+carrier power, and compare against the baseline of the empty room.
 
-Esa normalización es la que hace que el invento sobreviva al AGC del micro
-interno del Mac: si el sistema sube o baja la ganancia, portadora y bandas
-laterales se mueven juntas y el cociente no se entera.
+That normalisation is what lets the whole thing survive the automatic gain
+control of a laptop's built-in microphone: when the system raises or lowers the
+input gain, carrier and sidebands move together and the ratio never notices.
 
-Limitación honesta de la física: el Doppler detecta MOVIMIENTO, no presencia.
-Una mano perfectamente inmóvil no genera bandas laterales. Sí altera un poco la
-amplitud de la portadora, y eso se muestra como métrica secundaria, pero es
-bastante menos fiable.
+Honest limit of the physics: Doppler detects MOTION, not presence. A perfectly
+still object produces no sidebands. It does perturb the carrier amplitude a
+little, which is shown as a secondary metric, but that is far less reliable.
 
-Uso:
-    python doppler_hand.py                 # calibra y detecta
-    python doppler_hand.py --auto-freq     # busca antes la mejor portadora
-    python doppler_hand.py --list-devices
+Usage:
+    python doppler_sense.py                 # calibrate and detect
+    python doppler_sense.py --auto-freq     # find the best carrier first
+    python doppler_sense.py --list-devices
 """
 
 from __future__ import annotations
@@ -48,13 +46,13 @@ import sounddevice as sd
 C_SOUND = 343.0  # m/s
 
 
-# ---------------------------------------------------------------- utilidades
+# ---------------------------------------------------------------- utilities
 
 def blackman_harris(n: int) -> np.ndarray:
-    """Ventana de 4 términos: lóbulos laterales a -92 dB.
+    """Four-term window: sidelobes down at -92 dB.
 
-    Imprescindible aquí. Con una Hann normal (-31 dB) la fuga espectral de la
-    portadora enterraría las bandas laterales que queremos medir.
+    Essential here. With a plain Hann (-31 dB) the carrier's spectral leakage
+    would bury the very sidebands we are trying to measure.
     """
     a = (0.35875, 0.48829, 0.14128, 0.01168)
     w = 2 * np.pi * np.arange(n) / (n - 1)
@@ -70,7 +68,7 @@ GREEN, CYAN, GREY, BOLD, OFF = "\033[92m", "\033[96m", "\033[90m", "\033[1m", "\
 
 
 def vmeter(v: float, vmax: float, half: int = 16) -> str:
-    """Medidor bidireccional: cero en el centro, acercarse hacia la derecha."""
+    """Bidirectional meter: zero at the centre, approaching to the right."""
     frac = min(max(v / vmax, -1.0), 1.0)
     n = int(round(abs(frac) * half))
     if v >= 0:
@@ -81,7 +79,7 @@ def vmeter(v: float, vmax: float, half: int = 16) -> str:
 
 
 def spark(v: float, vmax: float) -> str:
-    """Un carácter de altura proporcional a |v|, coloreado por sentido."""
+    """One character, height proportional to |v|, coloured by direction."""
     lvl = int(round(min(abs(v) / vmax, 1.0) * 8))
     if lvl == 0:
         return GREY + "·" + OFF
@@ -95,14 +93,14 @@ def bar(value: float, lo: float, hi: float, width: int = 22) -> str:
     return "█" * n + "·" * (width - n)
 
 
-# ------------------------------------------------------------------- núcleo
+# -------------------------------------------------------------------- core
 
 class DopplerSensor:
-    """Stream full-duplex: emite la portadora y analiza lo que vuelve."""
+    """Full-duplex stream: emits the carrier and analyses what comes back."""
 
     def __init__(self, fs, f0, nfft, hop, amp, band, device=None):
         self.fs = fs
-        self.f0 = f0                     # mutable: --auto-freq lo va cambiando
+        self.f0 = f0                     # mutable: --auto-freq sweeps it
         self.nfft = nfft
         self.hop = hop
         self.amp = amp
@@ -110,20 +108,20 @@ class DopplerSensor:
         self.device = device
 
         self.window = blackman_harris(nfft)
-        # Normalización de amplitud: un seno a fondo de escala da 0 dBFS.
+        # Amplitude normalisation: a full-scale sine reads 0 dBFS.
         self.norm = 2.0 / self.window.sum()
         self.buf = np.zeros(nfft, dtype=np.float64)
         self.filled = 0
-        self.over = 2.5           # factor de sobre-resta del suelo de ruido
-        self.floor_up = None      # suelo de ruido por bin, lado superior
-        self.floor_dn = None      # ídem, lado inferior
+        self.over = 2.5           # noise-floor over-subtraction factor
+        self.floor_up = None      # per-bin noise floor, upper sideband
+        self.floor_dn = None      # ditto, lower sideband
         self.blocks: deque = deque(maxlen=128)
         self.lock = threading.Lock()
         self.phase = 0.0
         self.xruns = 0
         self.stream = None
 
-    # ---- callback de audio (tiempo real: nada pesado aquí dentro) --------
+    # ---- audio callback (real time: nothing heavy in here) ---------------
     def _callback(self, indata, outdata, frames, time_info, status):
         if status:
             self.xruns += 1
@@ -153,7 +151,7 @@ class DopplerSensor:
                 pass
             self.stream = None
 
-    # ---- flujo de datos --------------------------------------------------
+    # ---- data flow -------------------------------------------------------
     def pop_block(self):
         with self.lock:
             return self.blocks.popleft() if self.blocks else None
@@ -173,7 +171,7 @@ class DopplerSensor:
         return self.filled >= self.nfft
 
     def next_frame(self, timeout=1.0):
-        """Bloquea hasta tener un bloque nuevo y el buffer lleno."""
+        """Block until a new audio block arrives and the buffer is full."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             b = self.pop_block()
@@ -185,45 +183,45 @@ class DopplerSensor:
                 return True
         return False
 
-    # ---- análisis --------------------------------------------------------
+    # ---- analysis --------------------------------------------------------
     def analyze(self) -> dict:
         spec = np.fft.rfft(self.buf * self.window) * self.norm
         power = spec.real ** 2 + spec.imag ** 2
         binhz = self.fs / self.nfft
         c = int(round(self.f0 / binhz))
 
-        # La portadora ocupa unos pocos bins: ventana, más la deriva de reloj
-        # entre el DAC y el ADC. Se excluye una guarda a ambos lados.
+        # The carrier spans a few bins: the window, plus the clock drift
+        # between the DAC and the ADC. Guard bins are excluded on both sides.
         guard = 3
         carrier = power[c - guard: c + guard + 1].sum()
 
         lo = max(guard + 1, int(np.ceil(self.band_lo / binhz)))
         hi = int(np.floor(self.band_hi / binhz))
         up = power[c + lo: c + hi + 1]
-        dn = power[c - hi: c - lo + 1][::-1]      # invertido: offset creciente
+        dn = power[c - hi: c - lo + 1][::-1]      # flipped: offset increasing
 
         p_up, p_dn = up.sum(), dn.sum()
         score = db((p_up + p_dn) / max(carrier, 1e-30))
 
-        # Velocidad: centroide CON SIGNO del desplazamiento, tras restarle el
-        # suelo de ruido bin a bin. Sin esa resta, en reposo el centroide del
-        # puro ruido da un valor aleatorio de medio metro por segundo que no
-        # significa nada; con ella, en reposo se queda pegado a cero y el signo
-        # distingue acercarse (banda superior) de alejarse (banda inferior).
+        # Velocity: SIGNED centroid of the shift, after subtracting the noise
+        # floor bin by bin. Without that subtraction the centroid of pure noise
+        # reads a random half a metre per second that means nothing; with it,
+        # a still room pins to zero, and the sign tells approaching (upper
+        # sideband) from receding (lower sideband).
         if self.floor_up is None:
             ex_up, ex_dn, floor_e = up, dn, 0.0
         else:
-            # Sobre-resta: restar el suelo MEDIO deja la mitad de los bins por
-            # encima solo por azar, y ese residuo aleatorio produce un centroide
-            # errático. Restando k veces el suelo, un fotograma sin movimiento
-            # se queda en cero de verdad.
+            # Over-subtraction: taking away the MEAN floor still leaves half
+            # the bins above it by chance, and that random residue produces an
+            # erratic centroid. Subtracting k times the floor makes a
+            # motionless frame read a genuine zero.
             ex_up = np.maximum(up - self.over * self.floor_up, 0.0)
             ex_dn = np.maximum(dn - self.over * self.floor_dn, 0.0)
             floor_e = float(self.floor_up.sum() + self.floor_dn.sum())
 
         offsets = np.arange(lo, hi + 1) * binhz
         den = ex_up.sum() + ex_dn.sum()
-        # Puerta: por debajo de una fracción del suelo, no hay eco que medir.
+        # Gate: below a fraction of the floor there is no echo left to measure.
         if den > 1e-30 and den > 0.10 * floor_e:
             doppler_hz = float(((ex_up - ex_dn) * offsets).sum() / den)
         else:
@@ -238,7 +236,7 @@ class DopplerSensor:
         }
 
     def learn_floor(self, r, alpha):
-        """Actualiza el suelo de ruido por bin con un fotograma en calma."""
+        """Update the per-bin noise floor from a quiet frame."""
         if self.floor_up is None:
             self.floor_up, self.floor_dn = r["up"].copy(), r["dn"].copy()
         else:
@@ -247,11 +245,12 @@ class DopplerSensor:
 
 
 class Baseline:
-    """Línea base y umbral por ventana deslizante de fotogramas 'en calma'.
+    """Baseline and threshold over a sliding window of quiet frames.
 
-    Un promedio exponencial iría demasiado lento al arrancar y demasiado rápido
-    con la mano quieta delante. Una mediana móvil sobre los últimos segundos sin
-    detección es robusta a picos y sigue la deriva lenta del AGC.
+    An exponential average would be far too slow at startup and far too eager
+    with something parked in front of the screen. A running median over the
+    last few seconds without detections shrugs off spikes and still tracks the
+    slow drift of the AGC.
     """
 
     def __init__(self, window_s, rate_hz, margin_db, max_db):
@@ -269,17 +268,17 @@ class Baseline:
             return
         h = np.fromiter(self.hist, dtype=float)
         self.base = float(np.median(h))
-        # Desviación robusta (MAD). Usar percentiles altos o la desviación
-        # típica dispara el umbral en cuanto pasa un solo evento de movimiento
-        # durante la calibración, y entonces ya no detecta nada.
+        # Robust deviation (MAD). High percentiles or the standard deviation
+        # send the threshold through the roof the moment a single movement
+        # slips into the calibration window, and then nothing is ever detected.
         sigma = 1.4826 * float(np.median(np.abs(h - self.base)))
         self.thr = self.base + min(max(3.5 * sigma, self.margin), self.max_db)
 
 
-# -------------------------------------------------------------- modos de uso
+# -------------------------------------------------------------------- modes
 
 def warmup(sensor, seconds, msg):
-    """Llena el buffer y deja que el AGC del micro se asiente."""
+    """Fill the buffer and let the microphone AGC settle."""
     print(msg, end="", flush=True)
     t_end = time.time() + seconds
     while time.time() < t_end:
@@ -287,16 +286,17 @@ def warmup(sensor, seconds, msg):
         sys.stdout.write(".")
         sys.stdout.flush()
         time.sleep(0.25)
-    print(" listo")
+    print(" done")
 
 
 def auto_freq(sensor, candidates) -> float:
-    """Barre portadoras y elige la que mejor se recibe.
+    """Sweep carriers and keep the one that comes back strongest.
 
-    Los altavoces y micros de los Mac caen a plomo por encima de ~20 kHz y la
-    respuesta concreta varía según el modelo, así que más vale medirlo.
+    Laptop speakers and microphones fall off a cliff above ~20 kHz and the
+    exact response varies by model, so it is worth measuring rather than
+    guessing.
     """
-    print("Buscando la mejor portadora (~%.0f s, no toques nada):"
+    print("Scanning for the best carrier (~%.0f s, stay still):"
           % (0.8 * len(candidates)))
     best, best_level = candidates[0], -np.inf
     for f in candidates:
@@ -307,15 +307,15 @@ def auto_freq(sensor, candidates) -> float:
         while time.time() < t_end:
             if not sensor.next_frame():
                 break
-            if time.time() > t_end - 0.4:          # descarta el transitorio
+            if time.time() > t_end - 0.4:          # skip the transient
                 levels.append(sensor.analyze()["carrier_db"])
         level = float(np.median(levels)) if levels else -999.0
         mark = ""
         if level > best_level:
-            best, best_level, mark = f, level, "   <-- mejor"
-        print("   %6.0f Hz : portadora %6.1f dBFS%s" % (f, level, mark))
+            best, best_level, mark = f, level, "   <-- best"
+        print("   %6.0f Hz : carrier %6.1f dBFS%s" % (f, level, mark))
     sensor.f0 = best
-    print("Portadora elegida: %.0f Hz\n" % best)
+    print("Carrier chosen: %.0f Hz\n" % best)
     return best
 
 
@@ -330,32 +330,34 @@ def run(args):
     csv = open(args.csv, "w") if args.csv else None
 
     try:
-        warmup(sensor, 1.0, "Abriendo el stream")
+        warmup(sensor, 1.0, "Opening the stream")
 
         if args.auto_freq:
             cands = [f for f in range(17000, 21001, 500)
                      if f < args.samplerate / 2 - 1200]
             auto_freq(sensor, cands)
 
-        print("Portadora %.0f Hz  |  %.1f Hz/bin  |  ventana %.0f ms  |  "
-              "banda Doppler %.0f-%.0f Hz (%.2f-%.2f m/s)"
+        print("Carrier %.0f Hz  |  %.1f Hz/bin  |  %.0f ms window  |  "
+              "Doppler band %.0f-%.0f Hz (%.2f-%.2f m/s)"
               % (sensor.f0, binhz, 1000 * args.nfft / args.samplerate,
                  args.band_lo, args.band_hi,
                  args.band_lo * C_SOUND / (2 * sensor.f0),
                  args.band_hi * C_SOUND / (2 * sensor.f0)))
 
-        # El micro interno lleva control automático de ganancia y tarda unos
-        # segundos en asentarse; medir antes da una línea base mentirosa.
-        warmup(sensor, args.warmup, "Estabilizando el micro (%.0f s)" % args.warmup)
+        # The built-in microphone runs automatic gain control and takes a few
+        # seconds to settle; measuring before that yields a lying baseline.
+        warmup(sensor, args.warmup,
+               "Settling the microphone AGC (%.0f s)" % args.warmup)
 
         base = Baseline(args.window, rate_hz, args.margin, args.max_threshold)
-        print("Calibrando %.1f s: aparta las manos de la pantalla" % args.calib,
+        print("Calibrating for %.1f s: keep clear of the screen" % args.calib,
               end="", flush=True)
         carriers = []
         t_end = time.time() + args.calib
         while time.time() < t_end:
             if not sensor.next_frame():
-                print("\nNo llega audio del micrófono. ¿Permisos concedidos?")
+                print("\nNo audio arriving from the microphone. "
+                      "Is permission granted?")
                 return 1
             r = sensor.analyze()
             base.add(r["score"])
@@ -363,25 +365,25 @@ def run(args):
             carriers.append(r["carrier_db"])
         base.recompute()
         carrier_ref = float(np.median(carriers))
-        print("\n   línea base %.1f dB   umbral %.1f dB   portadora %.1f dBFS"
+        print("\n   baseline %.1f dB   threshold %.1f dB   carrier %.1f dBFS"
               % (base.base, base.thr, carrier_ref))
         if carrier_ref < -75:
-            print("   AVISO: apenas se recibe la portadora. Sube el volumen, usa\n"
-                  "   altavoces y micro INTERNOS (nada de Bluetooth) y prueba con\n"
-                  "   --auto-freq o una frecuencia más baja (--freq 17000).")
-        print("\nMueve la mano delante de la pantalla.  Ctrl-C para salir.\n")
+            print("   WARNING: the carrier is barely coming back. Turn the volume\n"
+                  "   up, use the BUILT-IN speakers and microphone (no Bluetooth),\n"
+                  "   and try --auto-freq or a lower carrier (--freq 17000).")
+        print("\nMove something in front of the screen.  Ctrl-C to quit.\n")
 
         if csv:
             csv.write("t,score_db,threshold_db,carrier_db,speed_ms,detected\n")
 
-        print("   alejándose ◄──────── velocidad ────────► acercándose")
+        print("   receding ◄──────── velocity ────────► approaching")
         t0 = time.time()
         last_hit = -1e9
         streak = 0
         smooth = base.base
         vel = 0.0
         hist = deque([0.0] * 56, maxlen=56)
-        sys.stdout.write("\n" * 4)        # hueco para el panel de 4 líneas
+        sys.stdout.write("\n" * 4)        # room for the four-line panel
         i = 0
         while args.seconds <= 0 or time.time() - t0 < args.seconds:
             if not sensor.next_frame():
@@ -389,41 +391,41 @@ def run(args):
             r = sensor.analyze()
             i += 1
 
-            smooth = 0.6 * smooth + 0.4 * r["score"]     # anti-parpadeo
+            smooth = 0.6 * smooth + 0.4 * r["score"]     # anti-flicker
             now = time.time()
             if smooth > base.thr:
                 streak += 1
-                if streak >= args.debounce:     # antirrebote: nada de picos sueltos
+                if streak >= args.debounce:     # debounce: ignore lone spikes
                     last_hit = now
             else:
                 streak = 0
-                base.add(r["score"])            # solo aprende en calma
+                base.add(r["score"])            # only learn while quiet
                 sensor.learn_floor(r, 0.02)
             if i % 16 == 0:
                 base.recompute()
 
             active = (now - last_hit) < args.hold
-            vel = 0.7 * vel + 0.3 * r["speed"]        # la velocidad también tiembla
-            # El estimador ya se silencia solo en calma, así que se muestra
-            # siempre: se ve incluso el movimiento que no llega al umbral.
-            vshow = vel
+            vel = 0.7 * vel + 0.3 * r["speed"]        # velocity jitters too
+            # The estimator already silences itself when the room is still, so
+            # it is always on display: even sub-threshold motion shows up.
+            vshow = 0.0 if abs(vel) < 0.005 else vel      # avoid "-0.00 m/s"
             hist.append(vshow)
 
             if active:
-                estado = (GREEN + "● MANO  " + OFF +
-                          ("acercándose" if vshow >= 0 else "alejándose "))
+                state = (GREEN + "● OBJECT  " + OFF +
+                         ("approaching" if vshow >= 0 else "receding   "))
             else:
-                estado = GREY + "○ sin movimiento      " + OFF
+                state = GREY + "○ no motion          " + OFF
 
             lines = [
-                "  señal     [%s] %6.1f dB      base %6.1f   umbral %6.1f"
+                "  signal    [%s] %6.1f dB      baseline %6.1f   threshold %6.1f"
                 % (bar(smooth, base.base, base.thr + 15), smooth,
                    base.base, base.thr),
-                "  veloc.  ◄%s►  %s%+5.2f m/s%s"
+                "  velocity ◄%s►  %s%+5.2f m/s%s"
                 % (vmeter(vshow, args.vmax), BOLD, vshow, OFF),
-                "  historia  %s" % "".join(spark(v, args.vmax) for v in hist),
-                "  estado    %s   portadora %+5.1f dB   %.0f Hz"
-                % (estado, r["carrier_db"] - carrier_ref, sensor.f0),
+                "  history   %s" % "".join(spark(v, args.vmax) for v in hist),
+                "  state     %s   carrier %+5.1f dB   %.0f Hz"
+                % (state, r["carrier_db"] - carrier_ref, sensor.f0),
             ]
             sys.stdout.write("\033[%dA" % len(lines))
             for ln in lines:
@@ -441,53 +443,53 @@ def run(args):
         sensor.close()
         if csv:
             csv.close()
-            print("\nCSV guardado en %s" % args.csv)
+            print("\nMeasurements written to %s" % args.csv)
         if sensor.xruns:
-            print("(%d fallos de buffer de audio)" % sensor.xruns)
+            print("(%d audio buffer glitches)" % sensor.xruns)
     print()
     return 0
 
 
 def main():
     p = argparse.ArgumentParser(
-        description="Detector de mano por efecto Doppler acústico (POC).")
+        description="Motion detector using acoustic Doppler shift (POC).")
     p.add_argument("--list-devices", action="store_true",
-                   help="lista los dispositivos de audio y sale")
+                   help="list the audio devices and exit")
     p.add_argument("--device", default=None,
-                   help="dispositivo 'entrada,salida' (índices o nombres)")
+                   help="device as 'input,output' (indices or names)")
     p.add_argument("--freq", type=float, default=19000.0,
-                   help="frecuencia de la portadora en Hz (def. 19000)")
+                   help="carrier frequency in Hz (default 19000)")
     p.add_argument("--auto-freq", action="store_true",
-                   help="barre 17-21 kHz y elige la portadora mejor recibida")
+                   help="sweep 17-21 kHz and pick the best-received carrier")
     p.add_argument("--samplerate", type=int, default=48000)
     p.add_argument("--nfft", type=int, default=8192,
-                   help="tamaño de FFT (8192 => 5.9 Hz/bin, ventana de 170 ms)")
+                   help="FFT size (8192 => 5.9 Hz/bin, 170 ms window)")
     p.add_argument("--hop", type=int, default=1024,
-                   help="muestras entre análisis (1024 => 21 ms de refresco)")
-    p.add_argument("--amp", type=float, default=0.15, help="amplitud del tono, 0-1")
+                   help="samples between analyses (1024 => 21 ms refresh)")
+    p.add_argument("--amp", type=float, default=0.15, help="tone amplitude, 0-1")
     p.add_argument("--band-lo", type=float, default=15.0,
-                   help="offset Doppler mínimo en Hz")
+                   help="minimum Doppler offset in Hz")
     p.add_argument("--band-hi", type=float, default=600.0,
-                   help="offset Doppler máximo en Hz")
+                   help="maximum Doppler offset in Hz")
     p.add_argument("--warmup", type=float, default=6.0,
-                   help="segundos de espera a que se asiente el AGC del micro")
+                   help="seconds to let the microphone AGC settle")
     p.add_argument("--calib", type=float, default=3.0,
-                   help="segundos de calibración del entorno vacío")
+                   help="seconds of empty-room calibration")
     p.add_argument("--window", type=float, default=12.0,
-                   help="segundos de historia para la línea base deslizante")
+                   help="seconds of history for the sliding baseline")
     p.add_argument("--margin", type=float, default=6.0,
-                   help="margen mínimo del umbral sobre la línea base, en dB")
+                   help="minimum threshold margin over the baseline, in dB")
     p.add_argument("--max-threshold", type=float, default=14.0,
-                   help="margen máximo del umbral sobre la línea base, en dB")
+                   help="maximum threshold margin over the baseline, in dB")
     p.add_argument("--debounce", type=int, default=2,
-                   help="frames consecutivos sobre el umbral para dar detección")
+                   help="consecutive frames over threshold to declare a hit")
     p.add_argument("--hold", type=float, default=0.5,
-                   help="segundos que se sostiene la detección tras el último pico")
+                   help="seconds a detection is held after the last peak")
     p.add_argument("--vmax", type=float, default=1.0,
-                   help="fondo de escala del medidor de velocidad, en m/s")
+                   help="full scale of the velocity meter, in m/s")
     p.add_argument("--seconds", type=float, default=0.0,
-                   help="parar automáticamente tras N segundos (0 = sin límite)")
-    p.add_argument("--csv", default=None, help="volcar las medidas a un CSV")
+                   help="stop automatically after N seconds (0 = no limit)")
+    p.add_argument("--csv", default=None, help="dump the measurements to a CSV")
     args = p.parse_args()
 
     if args.list_devices:
